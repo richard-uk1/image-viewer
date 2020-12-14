@@ -1,0 +1,31 @@
+[package]
+name = "image-viewer"
+version = "0.1.0"
+authors = ["Richard Dodd <richard.o.dodd@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+once_cell = "1.5.2"
+crossbeam-channel = "0.5.0"
+log = "0.4.11"
+
+[dependencies.druid]
+path = "../../contrib/druid/druid"
+features = [
+    "image",
+    "svg",
+    "png",
+    "jpeg",
+    "jpeg_rayon",
+    "gif",
+    "bmp",
+    "ico",
+    "tiff",
+    "webp",
+    "pnm",
+    "dds",
+    "tga",
+    "farbfeld",
+    "dxt",
+    "hdr"
+]
