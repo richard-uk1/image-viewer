@@ -11,8 +11,8 @@ log = "0.4.11"
 druid-lens-compose = "0.2"
 
 [dependencies.druid]
-path = "../../contrib/druid/druid"
-#git = "https://github.com/linebender/druid"
+#path = "../../contrib/druid/druid"
+git = "https://github.com/linebender/druid"
 features = [
     "image",
     "svg",

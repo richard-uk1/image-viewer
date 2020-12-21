@@ -27,11 +27,16 @@ pub struct ZoomImage {
     offset: Vec2,
     /// For drawing scrollbars.
     scroll_component: ScrollComponent,
+
     // Stuff for drag scrolling.
     /// The mouse position at the start of the scroll
     drag_start: Point,
     /// A temporary offset
-    tmp_offset: Option<Vec2>,
+    drag_offset: Option<Vec2>,
+
+    // Stuff for animating zoom.
+    draw_scale: f64,
+    draw_offset: Vec2,
 }
 
 impl ZoomImage {
@@ -43,7 +48,9 @@ impl ZoomImage {
             offset: (0., 0.).into(),
             scroll_component: ScrollComponent::new(),
             drag_start: Point::ZERO,
-            tmp_offset: None,
+            drag_offset: None,
+            draw_scale: 1.,
+            draw_offset: (0., 0.).into(),
         }
     }
 
@@ -61,14 +68,33 @@ impl ZoomImage {
         // Calculate the new offset (the new mouse position on the image - the mouse position on
         // screen
         self.offset = self.constrain_offset(-(new_image_pos - mouse_pos.to_vec2()), size);
+        self.draw_scale = self.scale;
+        self.draw_offset = self.offset;
     }
 
     /// Translate the image.
+    ///
+    /// We need to know the size of the viewport, and we can't get this without it being passed in.
+    /// If scale is currently being animated, then this will be animated too, so that the cursor
+    /// position doesn't change (except for constraints), otherwise it will be instant.
     fn translate(&mut self, amt: Vec2, size: Size) {
         // we are doing what `BoxConstraints` does, but we can't use it because we don't want its
         // rounding behavior.
         self.offset = self.offset + amt;
         self.offset = self.constrain_offset(self.offset, size);
+        self.draw_offset = self.offset;
+    }
+
+    /// Step forward the animation.
+    fn step_animation(&mut self) -> Finished {
+        let (next_scale, t) = scale_towards(self.draw_scale, self.scale);
+        self.draw_scale = next_scale;
+        self.draw_offset = self.draw_offset.lerp(self.offset, t);
+        if self.draw_scale == self.scale {
+            Finished::Yes
+        } else {
+            Finished::No
+        }
     }
 
     /// Take an offset, and clamp it to the allowed values.
@@ -94,22 +120,23 @@ impl ZoomImage {
         self.image = None;
         self.scale = 0.;
         self.offset = (0., 0.).into();
+        self.draw_scale = 0.;
+        self.draw_offset = (0., 0.).into();
     }
 
     /// The actual size we will draw.
     fn draw_size(&self) -> Size {
-        self.image_size * self.scale
+        self.image_size * self.draw_scale
     }
 
     /// The final offset we will draw the image to. Also useful for hit testing.
     fn draw_offset(&self, size: Size) -> Point {
-        let offset = self.constrain_offset(
-            match self.tmp_offset {
-                Some(tmp_offset) => self.offset + tmp_offset,
-                None => self.offset,
-            },
-            size,
-        );
+        let offset = match self.drag_offset {
+            Some(drag_offset) => self.draw_offset + drag_offset,
+            None => self.draw_offset,
+        };
+        // TODO shouldn't need this, turn it into a [debug_]assert?
+        let offset = self.constrain_offset(offset, size);
         let draw_size = self.draw_size();
         Point::new(
             if draw_size.width < size.width {
@@ -142,6 +169,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
                 let scale = (SCROLL_TWEAK * -wheel_delta.y.signum()).exp();
                 self.zoom(scale, *pos, ctx.size());
                 self.offset = self.constrain_offset(self.offset, ctx.size());
+                self.draw_offset = self.offset;
                 ctx.submit_command(scale_cmd(self.scale));
                 ctx.request_paint();
             }
@@ -152,20 +180,21 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
             }) if buttons.contains(MouseButton::Left) => {
                 if !ctx.is_active() {
                     self.drag_start = *window_pos;
-                    self.tmp_offset = Some(Vec2::ZERO);
+                    self.drag_offset = Some(Vec2::ZERO);
                     ctx.set_active(true);
                 }
             }
             Event::MouseUp(MouseEvent { buttons, .. }) if !buttons.contains(MouseButton::Left) => {
-                if let Some(tmp_offset) = self.tmp_offset {
-                    self.offset = self.constrain_offset(self.offset + tmp_offset, ctx.size());
+                if let Some(drag_offset) = self.drag_offset {
+                    self.offset = self.constrain_offset(self.offset + drag_offset, ctx.size());
+                    self.draw_offset = self.offset;
                 }
-                self.tmp_offset = None;
+                self.drag_offset = None;
                 ctx.set_active(false);
             }
             Event::MouseMove(MouseEvent { window_pos, .. }) => {
                 if ctx.is_active() {
-                    self.tmp_offset = Some(*window_pos - self.drag_start);
+                    self.drag_offset = Some(*window_pos - self.drag_start);
                     ctx.request_paint();
                 }
             }
@@ -184,6 +213,8 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
             LifeCycle::Size(size) => {
                 self.scale = self.scale.min(self.min_scale(*size));
                 self.offset = self.constrain_offset(self.offset, *size);
+                self.draw_scale = self.scale;
+                self.draw_offset = self.offset;
                 ctx.submit_command(scale_cmd(self.scale));
             }
             _ => (),
@@ -203,6 +234,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
                 self.invalidate_image();
                 self.image_size = next.size();
                 self.scale = self.min_scale(ctx.size());
+                self.draw_scale = self.scale;
                 ctx.submit_command(scale_cmd(self.scale));
                 ctx.request_paint();
             }
@@ -210,6 +242,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
                 self.invalidate_image();
                 self.image_size = next.size();
                 self.scale = self.min_scale(ctx.size());
+                self.draw_scale = self.scale;
                 ctx.submit_command(scale_cmd(self.scale));
                 ctx.request_paint();
             }
@@ -217,6 +250,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
                 self.invalidate_image();
                 self.image_size = Size::ZERO;
                 self.scale = self.min_scale(ctx.size());
+                self.draw_scale = self.scale;
                 ctx.submit_command(scale_cmd(self.scale));
                 ctx.request_paint();
             }
@@ -269,4 +303,39 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
 fn scale_cmd(scale: f64) -> Command {
     // todo make the target use the widget id.
     Command::new(UPDATE_SCALE, scale, Target::Global)
+}
+
+enum Finished {
+    Yes,
+    No,
+}
+
+impl Finished {
+    fn is_finished(&self) -> bool {
+        matches!(self, Finished::Yes)
+    }
+}
+
+/// Get a new scale nearer to `to` than `cur`.
+///
+/// The second value is the t in lerp, for scaling other things the same proportion.
+fn scale_towards(cur: f64, to: f64) -> (f64, f64) {
+    assert!(
+        cur.is_finite() && to.is_finite(),
+        "invalid params passed to `scale_towards`"
+    );
+    // special case where `cur == to` (avoids singularity below)
+    if cur == to {
+        return (to, 1.);
+    }
+
+    // denominator is the number of frames to get to `to`.
+    // TODO make const (if exp becomes const)
+    let step = (SCROLL_TWEAK / 5.).exp();
+    let next = if cur < to {
+        to.min(cur * step)
+    } else {
+        to.max(cur / step)
+    };
+    (next, (cur - next) / (cur - to))
 }

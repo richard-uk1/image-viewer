@@ -88,7 +88,11 @@ fn ui_builder() -> impl Widget<AppData> {
 fn open_button() -> impl Widget<AppData> {
     BgHover::new(
         Flex::column()
-            .with_child(Svg::new(OPEN_IMAGE_SVG.parse().unwrap()).fix_height(30.))
+            .with_child(
+                Svg::new(OPEN_IMAGE_SVG.parse().unwrap())
+                    .fix_height(30.)
+                    .fix_width(50.),
+            )
             // no need for spacer because of spacing around image
             .with_child(Label::new("Open"))
             .padding(4.)
