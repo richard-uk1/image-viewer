@@ -1,15 +1,18 @@
 mod widgets;
 
-use crossbeam_channel as channel;
+use crossbeam_channel::{self as channel, Receiver, RecvError};
 use druid::{
     commands::{OPEN_FILE, SHOW_OPEN_PANEL},
     kurbo::Point,
     theme,
     widget::{prelude::*, Flex, Label, Svg},
-    AppDelegate, AppLauncher, ArcStr, Command, Data, DelegateCtx, Env, FileDialogOptions, FileSpec,
-    Handled, ImageBuf, Lens, Selector, SingleUse, Target, Widget, WidgetExt, WidgetPod, WindowDesc,
+    AppDelegate, AppLauncher, ArcStr, Command, Data, DelegateCtx, Env, ExtEventSink,
+    FileDialogOptions, FileSpec, Handled, ImageBuf, Lens, Selector, SingleUse, Target, Widget,
+    WidgetExt, WidgetPod, WindowDesc,
 };
-use std::{error::Error, path::PathBuf, sync::Arc, thread};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use qu::ick_use::*;
+use std::{error::Error, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use crate::widgets::ZoomImage;
 
@@ -36,44 +39,129 @@ impl AppData {
     }
 }
 
-pub fn main() {
+#[qu::ick]
+pub fn main() -> Result {
     let main_window = WindowDesc::new(ui_builder).title("Image Viewer");
     // Set our initial data
     let data = AppData {
         image: None,
         error: "".into(),
     };
-    let launcher = AppLauncher::with_window(main_window).use_simple_logger();
+    let launcher = AppLauncher::with_window(main_window);
 
     // worker thread for IO
-    let evt_sink = launcher.get_external_handle();
-    let (gui_send, io_recv) = channel::unbounded::<UiMsg>();
-    let io_thread = thread::spawn(move || loop {
-        match io_recv.recv() {
-            Ok(UiMsg::LoadImage(path)) => {
-                if let Err(_) = evt_sink.submit_command(
-                    FILE_LOADED,
-                    SingleUse::new(ImageBuf::from_file(path)),
-                    Target::Global,
-                ) {
-                    log::error!("should be unreachable");
-                    break;
-                }
-            }
-            Ok(UiMsg::Shutdown) | Err(_) => break,
-        }
-    });
+    let (ui_tx, ui_rx) = channel::unbounded::<UiMsg>();
+    let mut io_state = IoState::new(ui_rx, launcher.get_external_handle())?;
+    let io_thread = thread::spawn(move || io_state.run());
 
     launcher
         .delegate(Delegate {
-            gui_send: gui_send.clone(),
+            ui_tx: ui_tx.clone(),
         })
         .launch(data)
         .expect("launch failed");
 
     // shut down gracefully
-    gui_send.send(UiMsg::Shutdown).unwrap();
+    ui_tx.send(UiMsg::Shutdown).unwrap();
     io_thread.join().unwrap();
+    Ok(())
+}
+
+/// State for the i/o thread
+struct IoState {
+    ui_rx: Receiver<UiMsg>,
+    evt_sink: ExtEventSink,
+    open_file: Option<PathBuf>,
+    watcher: RecommendedWatcher,
+    watcher_rx: Receiver<Result<notify::Event, notify::Error>>,
+}
+
+impl IoState {
+    fn new(ui_rx: Receiver<UiMsg>, evt_sink: ExtEventSink) -> Result<Self> {
+        let (watcher_tx, watcher_rx) = channel::unbounded();
+        Ok(Self {
+            ui_rx,
+            evt_sink,
+            open_file: None,
+            watcher: notify::recommended_watcher(watcher_tx)?,
+            watcher_rx,
+        })
+    }
+    fn run(&mut self) {
+        loop {
+            channel::select! {
+                recv(self.ui_rx) -> msg => if !self.handle_ui(msg) {
+                    break;
+                },
+                recv(self.watcher_rx) -> msg => if !self.handle_notify(msg) {
+                    break;
+                }
+            }
+        }
+    }
+
+    // returns false on error
+    fn handle_ui(&mut self, msg: Result<UiMsg, RecvError>) -> bool {
+        match msg {
+            Ok(UiMsg::LoadImage(path)) => self.load_img(path),
+            Ok(UiMsg::Shutdown) | Err(_) => false,
+        }
+    }
+
+    fn handle_notify(
+        &mut self,
+        msg: Result<Result<notify::Event, notify::Error>, RecvError>,
+    ) -> bool {
+        let msg = match msg {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("{}", e);
+                return false;
+            }
+        };
+        let evt = match msg {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("{}", e);
+                return false;
+            }
+        };
+        match &evt.kind {
+            notify::EventKind::Modify(_) => {
+                if let Some(path) = self.open_file.take() {
+                    // sleep for a bit to let the write finish
+                    thread::sleep(Duration::from_millis(1000));
+                    self.load_img(path)
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        }
+    }
+
+    fn load_img(&mut self, path: PathBuf) -> bool {
+        if let Some(prev) = self.open_file.as_ref() {
+            self.watcher.unwatch(prev).unwrap(); // TODO handle errors
+        }
+        self.open_file = None;
+        let image = ImageBuf::from_file(&path);
+        // only update state if the load was successful.
+        log::debug!("watching {}", path.display());
+        self.watcher
+            .watch(&path, RecursiveMode::NonRecursive)
+            .unwrap();
+        self.open_file = Some(path.clone());
+        if let Err(_) =
+            self.evt_sink
+                .submit_command(FILE_LOADED, SingleUse::new(image), Target::Global)
+        {
+            log::error!("should be unreachable");
+            false
+        } else {
+            true
+        }
+    }
 }
 
 fn ui_builder() -> impl Widget<AppData> {
@@ -114,7 +202,7 @@ enum UiMsg {
 }
 
 struct Delegate {
-    gui_send: channel::Sender<UiMsg>,
+    ui_tx: channel::Sender<UiMsg>,
 }
 
 impl AppDelegate<AppData> for Delegate {
@@ -127,7 +215,7 @@ impl AppDelegate<AppData> for Delegate {
         _env: &Env,
     ) -> Handled {
         if let Some(file) = cmd.get(OPEN_FILE) {
-            if let Err(e) = self.gui_send.send(UiMsg::LoadImage(file.path().to_owned())) {
+            if let Err(e) = self.ui_tx.send(UiMsg::LoadImage(file.path().to_owned())) {
                 data.set_error(format!("error sending message to io thread: {}", e).into());
             }
             Handled::Yes

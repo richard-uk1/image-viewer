@@ -1,6 +1,6 @@
 use druid::{
     kurbo::{Point, Rect, Vec2},
-    piet::{Image, InterpolationMode},
+    piet::{Image, InterpolationMode, PietImage},
     scroll_component::ScrollComponent,
     widget::prelude::*,
     Command, Data, ImageBuf, MouseButton, MouseEvent, RenderContext, Selector, Target,
@@ -15,12 +15,7 @@ const UPDATE_SCALE: Selector<f64> = Selector::new("image-viewer.update-scale");
 
 pub struct ZoomImage {
     /// The underlying image we will be painting
-    image: Option<Image>,
-    /// A cache of the image size
-    ///
-    /// Might be able to remove this if `piet::Image` gains the ability to get the size of the
-    /// image ([piet#370](https://github.com/linebender/piet/pull/370))
-    image_size: Size,
+    image: Option<PietImage>,
     /// How much to scale the image
     scale: f64,
     /// The offset of the top-left of the viewport with respect to the image.
@@ -43,8 +38,7 @@ impl ZoomImage {
     pub fn new() -> Self {
         ZoomImage {
             image: None,
-            image_size: Size::ZERO,
-            scale: 1.,
+            scale: f64::INFINITY,
             offset: (0., 0.).into(),
             scroll_component: ScrollComponent::new(),
             drag_start: Point::ZERO,
@@ -99,8 +93,9 @@ impl ZoomImage {
 
     /// Take an offset, and clamp it to the allowed values.
     fn constrain_offset(&self, offset: Vec2, size: Size) -> Vec2 {
-        let max_offset_x = (self.image_size.width * self.scale - size.width).max(0.);
-        let max_offset_y = (self.image_size.height * self.scale - size.height).max(0.);
+        let img_size = self.image_size();
+        let max_offset_x = (img_size.width * self.scale - size.width).max(0.);
+        let max_offset_y = (img_size.height * self.scale - size.height).max(0.);
         let max_offset = Size::new(max_offset_x, max_offset_y);
         offset
             .to_size()
@@ -110,23 +105,20 @@ impl ZoomImage {
 
     /// Get the minimum scale that will fit the whole image in.
     fn min_scale(&self, size: Size) -> f64 {
-        let min_x_scale = size.width / self.image_size.width;
-        let min_y_scale = size.height / self.image_size.height;
+        let img_size = self.image_size();
+        let min_x_scale = size.width / img_size.width;
+        let min_y_scale = size.height / img_size.height;
         min_x_scale.min(min_y_scale)
     }
 
     /// Invalidate the image cache.
     fn invalidate_image(&mut self) {
         self.image = None;
-        self.scale = 0.;
-        self.offset = (0., 0.).into();
-        self.draw_scale = 0.;
-        self.draw_offset = (0., 0.).into();
     }
 
     /// The actual size we will draw.
     fn draw_size(&self) -> Size {
-        self.image_size * self.draw_scale
+        self.image_size() * self.draw_scale
     }
 
     /// The final offset we will draw the image to. Also useful for hit testing.
@@ -150,6 +142,23 @@ impl ZoomImage {
                 offset.y
             },
         )
+    }
+
+    fn image_size(&self) -> Size {
+        self.image.as_ref().map(Image::size).unwrap()
+    }
+
+    fn constrain_scale_offset(&mut self, size: Size) {
+        let new_scale = self.scale.min(self.min_scale(size));
+        if new_scale != self.scale {
+            self.scale = new_scale;
+            self.draw_scale = new_scale;
+        }
+        let new_offset = self.constrain_offset(self.offset, size);
+        if new_offset != self.offset {
+            self.offset = new_offset;
+            self.draw_offset = new_offset;
+        }
     }
 }
 
@@ -210,12 +219,12 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
         env: &Env,
     ) {
         match event {
+            LifeCycle::WidgetAdded => {}
             LifeCycle::Size(size) => {
-                self.scale = self.scale.min(self.min_scale(*size));
-                self.offset = self.constrain_offset(self.offset, *size);
-                self.draw_scale = self.scale;
-                self.draw_offset = self.offset;
-                ctx.submit_command(scale_cmd(self.scale));
+                if data.is_some() {
+                    self.image = None;
+                    ctx.submit_command(scale_cmd(self.scale));
+                }
             }
             _ => (),
         }
@@ -232,25 +241,16 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
         match (old_data.as_ref(), data.as_ref()) {
             (Some(prev), Some(next)) if !prev.same(next) => {
                 self.invalidate_image();
-                self.image_size = next.size();
-                self.scale = self.min_scale(ctx.size());
-                self.draw_scale = self.scale;
                 ctx.submit_command(scale_cmd(self.scale));
                 ctx.request_paint();
             }
             (None, Some(next)) => {
                 self.invalidate_image();
-                self.image_size = next.size();
-                self.scale = self.min_scale(ctx.size());
-                self.draw_scale = self.scale;
                 ctx.submit_command(scale_cmd(self.scale));
                 ctx.request_paint();
             }
             (Some(_), None) => {
                 self.invalidate_image();
-                self.image_size = Size::ZERO;
-                self.scale = self.min_scale(ctx.size());
-                self.draw_scale = self.scale;
                 ctx.submit_command(scale_cmd(self.scale));
                 ctx.request_paint();
             }
@@ -270,6 +270,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, data: &Option<Arc<ImageBuf>>, env: &Env) {
+        log::debug!("size: {:?} scale: {:?}", ctx.size(), self.scale,);
         let size = ctx.size();
         assert!(
             self.scale >= 0.,
@@ -284,7 +285,8 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
         if let Some(data) = data.as_ref() {
             // rebuild cache if necessary
             if self.image.is_none() {
-                self.image = Some(data.to_piet_image(&mut **ctx));
+                self.image = Some(data.to_image(&mut **ctx));
+                self.constrain_scale_offset(size);
             }
             let draw_size = self.draw_size();
             if self.draw_size().is_empty() {
@@ -294,7 +296,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
             ctx.draw_image(
                 self.image.as_ref().unwrap(),
                 Rect::from_origin_size(draw_offset, draw_size),
-                InterpolationMode::NearestNeighbor,
+                InterpolationMode::Bilinear,
             );
         }
     }
