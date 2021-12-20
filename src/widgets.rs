@@ -11,36 +11,22 @@ use std::sync::Arc;
 const SCROLL_TWEAK: f64 = 0.5;
 const MAX_SCALE: f64 = 15.0; // 1_500%
 
-const UPDATE_SCALE: Selector<f64> = Selector::new("image-viewer.update-scale");
+pub const UPDATE_SCALE: Selector<f64> = Selector::new("image-viewer.update-scale");
 
 pub struct ZoomImage {
-    /// The underlying image we will be painting
-    image: Option<PietImage>,
-    /// How much to scale the image
-    scale: f64,
-    /// The offset of the top-left of the viewport with respect to the image.
-    offset: Vec2,
     /// For drawing scrollbars.
     scroll_component: ScrollComponent,
 
-    // Stuff for drag scrolling.
-    /// The mouse position at the start of the scroll
-    drag_start: Point,
-    /// A temporary offset
-    drag_offset: Option<Vec2>,
-
-    // Stuff for animating zoom.
-    draw_scale: f64,
-    draw_offset: Vec2,
+    inner: Option<ZoomImageInner>,
 }
 
 impl ZoomImage {
     pub fn new() -> Self {
         ZoomImage {
-            image: None,
             scale: f64::INFINITY,
             offset: (0., 0.).into(),
             scroll_component: ScrollComponent::new(),
+            image: None,
             drag_start: Point::ZERO,
             drag_offset: None,
             draw_scale: 1.,
@@ -50,15 +36,28 @@ impl ZoomImage {
 
     /// Zoom im/out by given scale, centred at given point.
     fn zoom(&mut self, scale_factor: f64, mouse_pos: Point, size: Size) {
-        assert!(scale_factor.is_finite() && scale_factor > 0.);
+        if scale_factor.is_finite() && scale_factor > 0. {
+            return;
+        }
         let old_scale = self.scale;
+
         // Get the mouse position relative to the image.
-        let image_pos = mouse_pos - self.draw_offset(size);
+        // If the image exists, use its offset, else use our target offset..
+        let draw_offset = self
+            .inner
+            .as_ref()
+            .map(|img| img.draw_offset)
+            .unwrap_or(self.offset);
+        let image_pos = mouse_pos - draw_offset;
+
         self.scale *= scale_factor;
+        // Constrain the scale
         self.scale = self.scale.max(self.min_scale(size)).min(MAX_SCALE);
+
         // Now we have the new scale we can apply it to our calculated image position to get the
         // same position in the new image.
         let new_image_pos = (self.scale / old_scale) * image_pos;
+
         // Calculate the new offset (the new mouse position on the image - the mouse position on
         // screen
         self.offset = self.constrain_offset(-(new_image_pos - mouse_pos.to_vec2()), size);
@@ -114,11 +113,6 @@ impl ZoomImage {
     /// Invalidate the image cache.
     fn invalidate_image(&mut self) {
         self.image = None;
-    }
-
-    /// The actual size we will draw.
-    fn draw_size(&self) -> Size {
-        self.image_size() * self.draw_scale
     }
 
     /// The final offset we will draw the image to. Also useful for hit testing.
@@ -179,8 +173,18 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
                 self.zoom(scale, *pos, ctx.size());
                 self.offset = self.constrain_offset(self.offset, ctx.size());
                 self.draw_offset = self.offset;
-                ctx.submit_command(scale_cmd(self.scale));
+                ctx.submit_command(scale_cmd(self.scale, ctx.widget_id()));
                 ctx.request_paint();
+            }
+            Event::Command(cmd) => {
+                if let Some(scale) = cmd.get(UPDATE_SCALE) {
+                    if matches!(cmd.target(), Target::Widget(wid) if wid == ctx.widget_id()) {
+                        self.zoom(*scale, (0., 0.).into(), ctx.size());
+                        self.offset = self.constrain_offset(self.offset, ctx.size());
+                        self.draw_offset = self.offset;
+                        ctx.request_paint();
+                    }
+                }
             }
             Event::MouseDown(MouseEvent {
                 buttons,
@@ -223,7 +227,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
             LifeCycle::Size(size) => {
                 if data.is_some() {
                     self.image = None;
-                    ctx.submit_command(scale_cmd(self.scale));
+                    ctx.submit_command(scale_cmd(self.scale, ctx.widget_id()));
                 }
             }
             _ => (),
@@ -241,17 +245,17 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
         match (old_data.as_ref(), data.as_ref()) {
             (Some(prev), Some(next)) if !prev.same(next) => {
                 self.invalidate_image();
-                ctx.submit_command(scale_cmd(self.scale));
+                ctx.submit_command(scale_cmd(self.scale, ctx.widget_id()));
                 ctx.request_paint();
             }
             (None, Some(next)) => {
                 self.invalidate_image();
-                ctx.submit_command(scale_cmd(self.scale));
+                ctx.submit_command(scale_cmd(self.scale, ctx.widget_id()));
                 ctx.request_paint();
             }
             (Some(_), None) => {
                 self.invalidate_image();
-                ctx.submit_command(scale_cmd(self.scale));
+                ctx.submit_command(scale_cmd(self.scale, ctx.widget_id()));
                 ctx.request_paint();
             }
             (Some(_), Some(_)) | (None, None) => (), // no change
@@ -272,6 +276,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
     fn paint(&mut self, ctx: &mut PaintCtx, data: &Option<Arc<ImageBuf>>, env: &Env) {
         log::debug!("size: {:?} scale: {:?}", ctx.size(), self.scale,);
         let size = ctx.size();
+        ctx.clip(size.to_rect());
         assert!(
             self.scale >= 0.,
             "scale should be >= 0, found {}",
@@ -302,9 +307,99 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
     }
 }
 
-fn scale_cmd(scale: f64) -> Command {
-    // todo make the target use the widget id.
-    Command::new(UPDATE_SCALE, scale, Target::Global)
+/// We only hold this state when an actual image is present.
+struct ZoomImageInner {
+    /// The underlying image we will be painting
+    image: PietImage,
+
+    /// The size of the area we will be drawing to
+    size: Size,
+    /// How much to scale the image
+    scale: f64,
+    /// The offset of the top-left of the viewport with respect to the image.
+    ///
+    /// If a drag operation is in progress, or
+    offset: Vec2,
+
+    mode: Mode,
+}
+
+impl ZoomImage {
+    pub fn new(image: PietImage, size: Size) -> Self {
+        image,
+        size,
+        scale: 1.,
+        offset: (0., 0.).into(),
+        mode: Mode::Normal,
+    }
+
+    /// The actual scale we will draw using.
+    fn draw_scale(&self) -> f64 {
+        match &self.mode {
+            Mode::Tween { scale } => scale,
+            _ => self.scale
+        }
+    }
+
+    /// The actual size we will draw.
+    fn draw_size(&self) -> Size {
+        self.size * self.draw_scale()
+    }
+
+
+    /// How much to offset the image for drawing
+    fn draw_offset(&self) -> Vec2 {
+        match &self.mode {
+            Mode::Normal => self.offset,
+            Mode::Drag(Drag { offset, .. }) => offset,
+            Mode::Anim(Tween { offset, .. }) =>
+        }
+        let offset = match self.drag_offset {
+            Some(drag_offset) => self.draw_offset + drag_offset,
+            None => self.draw_offset,
+        };
+        // TODO shouldn't need this, turn it into a [debug_]assert?
+        let offset = self.constrain_offset(offset, size);
+        let draw_size = self.draw_size();
+        Point::new(
+            if draw_size.width < size.width {
+                (size.width - draw_size.width) * 0.5
+            } else {
+                offset.x
+            },
+            if draw_size.height < size.height {
+                (size.height - draw_size.height) * 0.5
+            } else {
+                offset.y
+            },
+        )
+        }
+}
+
+enum Mode {
+    Normal,
+    Drag(Drag),
+    Anim(Tween),
+}
+
+struct Drag {
+    /// The mouse position at the start of the scroll
+    start: Point,
+    /// A temporary offset
+    offset: Vec2,
+}
+
+/// For animation
+struct Tween {
+    /// The current scale,
+    scale: f64,
+    /// The current offset.
+    offset: Vec2,
+}
+
+
+fn scale_cmd(scale: f64, id: WidgetId) -> Command {
+    Command::new(UPDATE_SCALE, scale, Target::Widget(id))
 }
 
 enum Finished {

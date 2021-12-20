@@ -14,7 +14,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use qu::ick_use::*;
 use std::{error::Error, path::PathBuf, sync::Arc, thread, time::Duration};
 
-use crate::widgets::ZoomImage;
+use crate::widgets::{ZoomImage, UPDATE_SCALE};
 
 const FILE_LOADED: Selector<SingleUse<Result<ImageBuf, Box<dyn Error + Send + Sync>>>> =
     Selector::new("image-viewer.file-loaded");
@@ -25,9 +25,18 @@ const ALL_IMAGES: FileSpec = FileSpec::new("Image", &["jpg", "jpeg", "gif", "bmp
 struct AppData {
     image: Option<Arc<ImageBuf>>,
     error: ArcStr,
+    info: ArcStr,
 }
 
 impl AppData {
+    fn new() -> Self {
+        Self {
+            image: None,
+            error: "".into(),
+            info: "".into(),
+        }
+    }
+
     fn set_image(&mut self, image: Arc<ImageBuf>) {
         self.image = Some(image);
         self.error = "".into()
@@ -43,10 +52,7 @@ impl AppData {
 pub fn main() -> Result {
     let main_window = WindowDesc::new(ui_builder).title("Image Viewer");
     // Set our initial data
-    let data = AppData {
-        image: None,
-        error: "".into(),
-    };
+    let data = AppData::new();
     let launcher = AppLauncher::with_window(main_window);
 
     // worker thread for IO
@@ -165,11 +171,19 @@ impl IoState {
 }
 
 fn ui_builder() -> impl Widget<AppData> {
-    let ribbon = Flex::row().with_child(open_button()).align_left();
+    let ribbon = Flex::row()
+        .with_child(open_button())
+        .with_child(actual_size_button())
+        .align_left();
     Flex::column()
         .with_child(ribbon)
         .with_flex_child(ZoomImage::new().lens(AppData::image).center(), 1.0)
-        .with_child(Label::raw().lens(AppData::error).align_left())
+        .with_child(
+            Flex::row()
+                .with_child(Label::raw().lens(AppData::error))
+                .with_flex_spacer(1.)
+                .with_child(Label::raw().lens(AppData::info)),
+        )
     //.debug_paint_layout()
 }
 
@@ -192,6 +206,23 @@ fn open_button() -> impl Widget<AppData> {
                         FileSpec::GIF,
                     ]),
                 ));
+            }),
+    )
+}
+
+fn actual_size_button() -> impl Widget<AppData> {
+    BgHover::new(
+        Flex::column()
+            .with_child(
+                Svg::new(OPEN_IMAGE_SVG.parse().unwrap())
+                    .fix_height(30.)
+                    .fix_width(50.),
+            )
+            // no need for spacer because of spacing around image
+            .with_child(Label::new("Actual Size"))
+            .padding(4.)
+            .on_click(|ctx, _, _| {
+                ctx.submit_command(UPDATE_SCALE.with(1.));
             }),
     )
 }
@@ -225,6 +256,9 @@ impl AppDelegate<AppData> for Delegate {
                 Err(e) => data.set_error(format!("error decoding/loading image: {}", e).into()),
             }
             Handled::Yes
+        } else if let Some(scale) = cmd.get(UPDATE_SCALE) {
+            data.info = format!("scale: {:.2}%", scale * 100.).into();
+            Handled::No
         } else {
             Handled::No
         }
