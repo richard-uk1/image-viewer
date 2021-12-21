@@ -14,7 +14,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use qu::ick_use::*;
 use std::{error::Error, path::PathBuf, sync::Arc, thread, time::Duration};
 
-use crate::widgets::{ZoomImage, UPDATE_SCALE};
+use crate::widgets::{ZoomImage, SET_SCALE};
 
 const FILE_LOADED: Selector<SingleUse<Result<ImageBuf, Box<dyn Error + Send + Sync>>>> =
     Selector::new("image-viewer.file-loaded");
@@ -222,7 +222,7 @@ fn actual_size_button() -> impl Widget<AppData> {
             .with_child(Label::new("Actual Size"))
             .padding(4.)
             .on_click(|ctx, _, _| {
-                ctx.submit_command(UPDATE_SCALE.with(1.));
+                ctx.submit_command(SET_SCALE.with(1.));
             }),
     )
 }
@@ -256,9 +256,11 @@ impl AppDelegate<AppData> for Delegate {
                 Err(e) => data.set_error(format!("error decoding/loading image: {}", e).into()),
             }
             Handled::Yes
-        } else if let Some(scale) = cmd.get(UPDATE_SCALE) {
-            data.info = format!("scale: {:.2}%", scale * 100.).into();
-            Handled::No
+            /*
+            } else if let Some(scale) = cmd.get(UPDATE_SCALE) {
+                data.info = format!("scale: {:.2}%", scale * 100.).into();
+                Handled::No
+                */
         } else {
             Handled::No
         }
