@@ -1,21 +1,18 @@
 use druid::{
-    kurbo::{Point, Rect, TranslateScale, Vec2},
+    kurbo::{Point, TranslateScale, Vec2},
     piet::{Image, InterpolationMode, Piet, PietImage},
     scroll_component::ScrollComponent,
     widget::prelude::*,
-    Affine, Command, Data, ImageBuf, MouseButton, MouseEvent, RenderContext, Selector, Target,
+    Data, ImageBuf, MouseButton, MouseEvent, RenderContext, Selector, Target,
 };
-use std::{
-    cell::{Ref, RefCell},
-    rc::Rc,
-    sync::Arc,
-};
+use std::{rc::Rc, sync::Arc};
 
 /// The amount to scale scrolls by
 const SCROLL_TWEAK: f64 = 0.5;
 const MAX_SCALE: f64 = 15.0; // 1_500%
 
 pub const SET_SCALE: Selector<f64> = Selector::new("image-viewer.set-scale");
+pub const TRANS_CHANGED: Selector<TranslateScale> = Selector::new("image-viewer.transform-changed");
 
 pub struct ZoomImage {
     /// For drawing scrollbars.
@@ -38,8 +35,8 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
         &mut self,
         ctx: &mut EventCtx,
         event: &Event,
-        data: &mut Option<Arc<ImageBuf>>,
-        env: &Env,
+        _data: &mut Option<Arc<ImageBuf>>,
+        _env: &Env,
     ) {
         match event {
             // f64::clamp has been stabilized. Use here once it's ridden the trains.
@@ -50,6 +47,10 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
                     let scale = (SCROLL_TWEAK * -wheel_delta.y.signum()).exp();
                     inner.zoom(scale, *pos);
                     ctx.request_paint();
+                    if inner.is_animating() {
+                        ctx.request_anim_frame();
+                        ctx.submit_notification(TRANS_CHANGED.with(inner.trans));
+                    }
                 }
             }
             Event::Command(cmd) => {
@@ -58,6 +59,9 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
                         if let Some(inner) = &mut self.inner {
                             inner.zoom(*scale, (0., 0.).into());
                             ctx.request_paint();
+                            if inner.is_animating() {
+                                ctx.request_anim_frame();
+                            }
                         }
                     }
                 }
@@ -68,7 +72,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
                 ..
             }) if buttons.contains(MouseButton::Left) => {
                 if let Some(inner) = &mut self.inner {
-                    if !matches!(inner.mode, Mode::Drag(_)) {
+                    if !inner.is_dragging() {
                         inner.drag_start(*window_pos);
                         ctx.set_active(true);
                     }
@@ -76,7 +80,10 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
             }
             Event::MouseUp(MouseEvent { buttons, .. }) if !buttons.contains(MouseButton::Left) => {
                 if let Some(inner) = &mut self.inner {
-                    inner.drag_stop();
+                    if inner.drag_stop() {
+                        ctx.request_anim_frame();
+                        ctx.submit_notification(TRANS_CHANGED.with(inner.trans));
+                    }
                     ctx.request_paint();
                 }
                 ctx.set_active(false);
@@ -86,24 +93,39 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
                     inner.drag_move(*window_pos, ctx);
                 }
             }
+            Event::AnimFrame(time) => {
+                // scale to ms.
+                let time = *time as f64 * 0.000_001;
+                if let Some(inner) = &mut self.inner {
+                    if let Mode::Anim(anim) = &mut inner.mode {
+                        anim.update(time);
+                        if anim.is_complete() {
+                            inner.mode = Mode::Normal;
+                        } else {
+                            ctx.request_anim_frame();
+                        }
+                    }
+                }
+                ctx.request_paint();
+            }
             _ => (),
         }
     }
 
     fn lifecycle(
         &mut self,
-        ctx: &mut LifeCycleCtx,
+        _ctx: &mut LifeCycleCtx,
         event: &LifeCycle,
-        data: &Option<Arc<ImageBuf>>,
-        env: &Env,
+        _data: &Option<Arc<ImageBuf>>,
+        _env: &Env,
     ) {
         match event {
             LifeCycle::WidgetAdded => {}
             LifeCycle::Size(size) => {
                 if let Some(inner) = &mut self.inner {
                     inner.size = *size;
-                    inner.zoom(1., Point::ZERO);
-                    // If the widget size changed, then cancel drag and complete animation.
+                    inner.constrain_transform();
+                    // Cancel drag and complete animation.
                     inner.mode = Mode::Normal;
                 }
             }
@@ -116,7 +138,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
         ctx: &mut UpdateCtx,
         old_data: &Option<Arc<ImageBuf>>,
         data: &Option<Arc<ImageBuf>>,
-        env: &Env,
+        _env: &Env,
     ) {
         // TODO it would be nice if we could make the image here.
         match (old_data.as_ref(), data.as_ref()) {
@@ -140,10 +162,10 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
 
     fn layout(
         &mut self,
-        ctx: &mut LayoutCtx,
+        _ctx: &mut LayoutCtx,
         bc: &BoxConstraints,
-        data: &Option<Arc<ImageBuf>>,
-        env: &Env,
+        _data: &Option<Arc<ImageBuf>>,
+        _env: &Env,
     ) -> Size {
         // We take all the space we can.
         // TODO take less space if we wouldn't fill it all due to zoom.
@@ -151,7 +173,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
         bc.max()
     }
 
-    fn paint(&mut self, ctx: &mut PaintCtx, data: &Option<Arc<ImageBuf>>, env: &Env) {
+    fn paint(&mut self, ctx: &mut PaintCtx, _data: &Option<Arc<ImageBuf>>, _env: &Env) {
         let inner = match &mut self.inner {
             Some(v) => v,
             // nothing to draw if we don't have an image.
@@ -206,6 +228,8 @@ impl ZoomImageInner {
         self.image = image;
         self.piet_image = None;
         self.constrain_transform();
+        // Cancel animation & drag.
+        self.mode = Mode::Normal;
     }
 
     fn image(&mut self, rc: &mut Piet) -> Rc<PietImage> {
@@ -223,7 +247,7 @@ impl ZoomImageInner {
     /// What the scale and offset actually change to will depend on constraints.
     ///
     /// A scale factor `> 1` means enlarge, `< 1` means shrink. A scale factor
-    /// of `1` can be used to reapply the constraints.
+    /// of `1` does nothing.
     ///
     /// `origin` is the point in widget space where the zoom is centred.
     ///
@@ -242,6 +266,7 @@ impl ZoomImageInner {
             "scale centre must be finite, found {:?}",
             origin
         );
+        /*
         println!(
             "scale_factor: {:.2} image_size: {:.2} view_size {:.2} origin {:.2}",
             scale_factor,
@@ -249,10 +274,12 @@ impl ZoomImageInner {
             self.size,
             origin,
         );
+        */
+
+        let old_trans = self.trans;
 
         // Get the point in image space that the zoom in centred on
         let origin_img = self.trans.inverse() * origin;
-        dbg!(origin_img);
 
         // Scale
         let scale = self.trans.as_tuple().1 * scale_factor;
@@ -263,22 +290,26 @@ impl ZoomImageInner {
         let origin_scaled = origin_img.to_vec2() * scale;
 
         // Calculate the new offset (the new mouse position on the image - the mouse position on
-        // screen
+        // screen. TODO this works but I don't know why. Actually do the math.
         let diff = origin.to_vec2() - origin_scaled;
 
         self.trans = TranslateScale::new(diff, scale);
         self.constrain_transform();
+        if !trans_approx_eq(self.trans, old_trans) {
+            match &mut self.mode {
+                Mode::Normal => {
+                    self.mode = Mode::Anim(AnimState::new(old_trans, self.trans));
+                }
+                Mode::Anim(anim) => {
+                    self.mode = Mode::Anim(AnimState::new(anim.current, self.trans))
+                }
+                // If we're dragging then don't animate
+                Mode::Drag(_) => (),
+            }
+        }
     }
 
-    /// Get the maximum scale that will fit the whole image in.
-    fn min_scale(&self) -> f64 {
-        let img_size = self.image.size();
-        let min_x_scale = self.size.width / img_size.width;
-        let min_y_scale = self.size.height / img_size.height;
-        min_x_scale.min(min_y_scale)
-    }
-
-    /// Transform the image at 100% scale positioned at 0,0 to the correct image
+    /// Transform the image at 100% scale positioned at (0,0) to the correct image
     /// position, taking into account any drag operation or animation in progress.
     fn draw_transform(&self) -> TranslateScale {
         match self.mode {
@@ -287,28 +318,44 @@ impl ZoomImageInner {
                 let (trans, scale) = self.trans.as_tuple();
                 TranslateScale::new(trans + diff, scale)
             }
-            Mode::Anim(AnimState { trans }) => trans,
+            Mode::Anim(AnimState { current, .. }) => current,
         }
     }
 
+    /// Switch to drag state.
     fn drag_start(&mut self, window_pos: Point) {
+        // TODO if mid-animation, capture that state so that point under mouse stays
+        // the same (if possible after constraints)
         self.mode = Mode::Drag(Drag {
             start: window_pos,
             diff: Vec2::ZERO,
         });
     }
 
-    fn drag_stop(&mut self) {
+    /// Complete drag state (go back to normal).
+    ///
+    /// Returns true if we need to request animation frame.
+    fn drag_stop(&mut self) -> bool {
         if let Mode::Drag(drag) = &self.mode {
             let (trans, scale) = self.trans.as_tuple();
-            self.trans = TranslateScale::new(trans + drag.diff, scale);
+            let current_trans = TranslateScale::new(trans + drag.diff, scale);
+            self.trans = current_trans;
             self.constrain_transform();
-        }
-        if matches!(self.mode, Mode::Drag(_)) {
-            self.mode = Mode::Normal;
+            if trans_approx_eq(self.trans, current_trans) {
+                self.mode = Mode::Normal;
+                false
+            } else {
+                self.mode = Mode::Anim(AnimState::new(current_trans, self.trans));
+                true
+            }
+        } else {
+            false
         }
     }
 
+    /// Update the drag state.
+    ///
+    /// Does nothing if we aren't in the drag state.
     fn drag_move(&mut self, window_pos: Point, ctx: &mut EventCtx) {
         if let Mode::Drag(drag) = &mut self.mode {
             drag.diff = window_pos - drag.start;
@@ -316,8 +363,17 @@ impl ZoomImageInner {
         }
     }
 
+    /// Helper function to call `constrain_transform` for this image.
     fn constrain_transform(&mut self) {
         self.trans = constrain_transform(self.image.size(), self.size, self.trans);
+    }
+
+    fn is_dragging(&self) -> bool {
+        matches!(self.mode, Mode::Drag(_))
+    }
+
+    fn is_animating(&self) -> bool {
+        matches!(self.mode, Mode::Anim(_))
     }
 }
 
@@ -341,87 +397,85 @@ struct Drag {
 /// For animation
 struct AnimState {
     /// The current transform,
-    trans: TranslateScale,
+    current: TranslateScale,
+    /// The target transform,
+    to: TranslateScale,
+    /// How much to increment each parameter per millisecond
+    inc: TranslateScale,
 }
 
-enum Finished {
-    Yes,
-    No,
-}
+impl AnimState {
+    fn new(from: TranslateScale, to: TranslateScale) -> Self {
+        // Target animation length is 500ms.
+        const TARGET_ANIM_LEN: f64 = 100.;
 
-impl Finished {
-    fn is_finished(&self) -> bool {
-        matches!(self, Finished::Yes)
+        // The animation is already complete. So we just put anything in the increment fields because
+        // on the first iteration the animation will end.
+        if trans_approx_eq(from, to) {
+            return AnimState {
+                current: to,
+                to,
+                inc: TranslateScale::default(),
+            };
+        }
+        let (
+            Vec2 {
+                x: x_from,
+                y: y_from,
+            },
+            s_from,
+        ) = from.as_tuple();
+        let (Vec2 { x: x_to, y: y_to }, s_to) = to.as_tuple();
+        // Calculate the change per millisecond.
+        let x_inc = (x_to - x_from) / TARGET_ANIM_LEN;
+        let y_inc = (y_to - y_from) / TARGET_ANIM_LEN;
+        let s_inc = (s_to - s_from) / TARGET_ANIM_LEN;
+        Self {
+            current: from,
+            to,
+            inc: TranslateScale::new(Vec2::new(x_inc, y_inc), s_inc),
+        }
+    }
+
+    /// Update the animation, given the time in ms.
+    fn update(&mut self, time: f64) {
+        let (Vec2 { x: x_cur, y: y_cur }, s_cur) = self.current.as_tuple();
+        let (Vec2 { x: x_to, y: y_to }, s_to) = self.to.as_tuple();
+        let (Vec2 { x: x_inc, y: y_inc }, s_inc) = self.inc.as_tuple();
+
+        let mut x_next = x_cur + x_inc * time;
+        let mut y_next = y_cur + y_inc * time;
+        let mut s_next = s_cur + s_inc * time;
+
+        if (x_next - x_to) * (x_cur - x_to) < 0. {
+            x_next = x_to;
+        }
+        if (y_next - y_to) * (y_cur - y_to) < 0. {
+            y_next = y_to;
+        }
+        if (s_next - s_to) * (s_cur - s_to) < 0. {
+            s_next = s_to;
+        }
+        self.current = TranslateScale::new(Vec2::new(x_next, y_next), s_next);
+    }
+
+    /// Is the animation complete
+    fn is_complete(&self) -> bool {
+        trans_approx_eq(self.current, self.to)
     }
 }
 
-/// Get a new scale nearer to `to` than `cur`.
-///
-/// The second value is the t in lerp, for scaling other things the same proportion.
-fn scale_towards(cur: f64, to: f64) -> (f64, f64) {
-    assert!(
-        cur.is_finite() && to.is_finite(),
-        "invalid params passed to `scale_towards`"
-    );
-    // special case where `cur == to` (avoids singularity below)
-    if cur == to {
-        return (to, 1.);
-    }
-
-    // denominator is the number of frames to get to `to`.
-    // TODO make const (if exp becomes const)
-    let step = (SCROLL_TWEAK / 5.).exp();
-    let next = if cur < to {
-        to.min(cur * step)
-    } else {
-        to.max(cur / step)
-    };
-    (next, (cur - next) / (cur - to))
-}
-
-/// Given an offset, return one that is closest while keeping the image on screen.
-fn constrain_offset(img_size: Size, widget_size: Size, scale: f64, offset: Vec2) -> Vec2 {
-    assert!(offset.x.is_finite() && offset.y.is_finite());
-
-    Vec2 {
-        x: offset
-            .x
-            .max(widget_size.width - img_size.width * scale)
-            .min(0.),
-        y: offset
-            .y
-            .max(widget_size.height - img_size.height * scale)
-            .min(0.),
-    }
-}
-
-/// Given an offset, return one that is closest while keeping the image on screen.
+/// Takes any transform and returns the "closest" transform that is inside our constraints.
 fn constrain_transform(img_size: Size, widget_size: Size, trans: TranslateScale) -> TranslateScale {
-    let (Vec2 { x: tx, y: ty }, scale) = trans.as_tuple();
+    let (offset, scale) = trans.as_tuple();
 
     // Firstly, constrain the scaling.
     let scale = constrain_scale(img_size, widget_size, scale);
 
-    // Then, constrain the translation.
-    // For each direction:
-    //  - At the lower end, the bottom/right side must be >= the widget edge
-    //  - At the upper end, the top/left size must be <= the widget edge (always 0.)
-    //  - If we can't satisfy both of these, then center the image in the widget
-    //    (it will be too small)
-    let offset_x = widget_size.width - img_size.width * scale;
-    let tx = if offset_x > 0. {
-        offset_x * 0.5
-    } else {
-        tx.min(0.).max(offset_x)
-    };
-    let offset_y = widget_size.height - img_size.height * scale;
-    let ty = if offset_y > 0. {
-        offset_y * 0.5
-    } else {
-        ty.min(0.).max(offset_y)
-    };
+    // Then, given the chosen scale, constrain the offset.
+    let offset = constrain_offset(img_size, widget_size, scale, offset);
 
-    TranslateScale::new(Vec2::new(tx, ty), scale)
+    TranslateScale::new(offset, scale)
 }
 
 fn constrain_scale(img_size: Size, widget_size: Size, scale: f64) -> f64 {
@@ -434,4 +488,34 @@ fn constrain_scale(img_size: Size, widget_size: Size, scale: f64) -> f64 {
     let min_y_scale = widget_size.height / img_size.height;
     let min_scale = min_x_scale.min(min_y_scale).min(1.);
     scale.min(MAX_SCALE).max(min_scale)
+}
+
+fn constrain_offset(img_size: Size, widget_size: Size, scale: f64, offset: Vec2) -> Vec2 {
+    // For each direction:
+    //  - At the lower end, the bottom/right side must be >= the widget edge
+    //  - At the upper end, the top/left size must be <= the widget edge (always 0.)
+    //  - If we can't satisfy both of these, then center the image in the widget
+    //    (it will be too small)
+    let Vec2 { x: tx, y: ty } = offset;
+    let diff_x = widget_size.width - img_size.width * scale;
+    let tx = if diff_x > 0. {
+        diff_x * 0.5
+    } else {
+        tx.min(0.).max(diff_x)
+    };
+    let diff_y = widget_size.height - img_size.height * scale;
+    let ty = if diff_y > 0. {
+        diff_y * 0.5
+    } else {
+        ty.min(0.).max(diff_y)
+    };
+    Vec2::new(tx, ty)
+}
+
+/// Compare two transforms to see if they are approximately equal.
+fn trans_approx_eq(t1: TranslateScale, t2: TranslateScale) -> bool {
+    const EPSILON: f64 = 1e-6;
+    let (t1, s1) = t1.as_tuple();
+    let (t2, s2) = t2.as_tuple();
+    (t2 - t1).hypot2() < EPSILON.powi(2) && (s1 - s2).abs() < EPSILON
 }
