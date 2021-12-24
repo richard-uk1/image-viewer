@@ -11,6 +11,7 @@ use std::{rc::Rc, sync::Arc};
 const SCROLL_TWEAK: f64 = 0.5;
 const MIN_SCALE: f64 = 0.2; // 20%
 const MAX_SCALE: f64 = 15.0; // 1_500%
+const TARGET_ANIM_LEN: f64 = 160.;
 
 /// Set the zoom to a particular scale.
 pub const SET_SCALE: Selector<f64> = Selector::new("image-viewer.set-scale");
@@ -277,10 +278,11 @@ impl ZoomImage {
         if !trans_approx_eq(self.trans, old_trans) {
             match &mut self.mode {
                 Mode::Normal => {
-                    self.mode = Mode::Anim(AnimState::new(old_trans, self.trans));
+                    self.mode = Mode::Anim(AnimState::new(old_trans, self.trans, TARGET_ANIM_LEN));
                 }
                 Mode::Anim(anim) => {
-                    self.mode = Mode::Anim(AnimState::new(anim.current, self.trans))
+                    let current = anim.current();
+                    self.mode = Mode::Anim(AnimState::new(current, self.trans, TARGET_ANIM_LEN))
                 }
                 // If we're dragging then don't animate
                 Mode::Drag(_) => (),
@@ -291,13 +293,13 @@ impl ZoomImage {
     /// Transform the image at 100% scale positioned at (0,0) to the correct image
     /// position, taking into account any drag operation or animation in progress.
     fn draw_transform(&self) -> TranslateScale {
-        match self.mode {
+        match &self.mode {
             Mode::Normal => self.trans,
             Mode::Drag(Drag { diff, .. }) => {
                 let (trans, scale) = self.trans.as_tuple();
-                TranslateScale::new(trans + diff, scale)
+                TranslateScale::new(trans + *diff, scale)
             }
-            Mode::Anim(AnimState { current, .. }) => current,
+            Mode::Anim(anim_state) => anim_state.current(),
         }
     }
 
@@ -324,7 +326,7 @@ impl ZoomImage {
                 self.mode = Mode::Normal;
                 false
             } else {
-                self.mode = Mode::Anim(AnimState::new(current_trans, self.trans));
+                self.mode = Mode::Anim(AnimState::new(current_trans, self.trans, TARGET_ANIM_LEN));
                 true
             }
         } else {
@@ -379,72 +381,62 @@ struct Drag {
 
 /// For animation
 struct AnimState {
-    /// The current transform,
-    current: TranslateScale,
-    /// The target transform,
+    /// The current position in the animation
+    t: f64,
+    /// The starting transform
+    from: TranslateScale,
+    /// The target transform
     to: TranslateScale,
-    /// How much to increment each parameter per millisecond
-    inc: TranslateScale,
+    /// The speed at which to animate (time to complete in ms)
+    len: f64,
 }
 
 impl AnimState {
-    fn new(from: TranslateScale, to: TranslateScale) -> Self {
-        // Target animation length is 500ms.
-        const TARGET_ANIM_LEN: f64 = 100.;
-
-        // The animation is already complete. So we just put anything in the increment fields because
-        // on the first iteration the animation will end.
+    fn new(from: TranslateScale, to: TranslateScale, len: f64) -> Self {
+        // The animation is already complete.
         if trans_approx_eq(from, to) {
-            return AnimState {
-                current: to,
+            return Self {
+                t: 1.,
+                from,
                 to,
-                inc: TranslateScale::default(),
+                len, // arbitrary
             };
         }
+        Self {
+            t: 0.,
+            from,
+            to,
+            len,
+        }
+    }
+
+    /// Get the current state of the animation
+    fn current(&self) -> TranslateScale {
         let (
             Vec2 {
                 x: x_from,
                 y: y_from,
             },
             s_from,
-        ) = from.as_tuple();
-        let (Vec2 { x: x_to, y: y_to }, s_to) = to.as_tuple();
-        // Calculate the change per millisecond.
-        let x_inc = (x_to - x_from) / TARGET_ANIM_LEN;
-        let y_inc = (y_to - y_from) / TARGET_ANIM_LEN;
-        let s_inc = (s_to - s_from) / TARGET_ANIM_LEN;
-        Self {
-            current: from,
-            to,
-            inc: TranslateScale::new(Vec2::new(x_inc, y_inc), s_inc),
-        }
+        ) = self.from.as_tuple();
+        let (Vec2 { x: x_to, y: y_to }, s_to) = self.to.as_tuple();
+
+        let t = easings::cubic_out(self.t);
+        let x_cur = x_from + (x_to - x_from) * t;
+        let y_cur = y_from + (y_to - y_from) * t;
+        let s_cur = s_from + (s_to - s_from) * t;
+
+        TranslateScale::new(Vec2::new(x_cur, y_cur), s_cur)
     }
 
     /// Update the animation, given the time in ms.
     fn update(&mut self, time: f64) {
-        let (Vec2 { x: x_cur, y: y_cur }, s_cur) = self.current.as_tuple();
-        let (Vec2 { x: x_to, y: y_to }, s_to) = self.to.as_tuple();
-        let (Vec2 { x: x_inc, y: y_inc }, s_inc) = self.inc.as_tuple();
-
-        let mut x_next = x_cur + x_inc * time;
-        let mut y_next = y_cur + y_inc * time;
-        let mut s_next = s_cur + s_inc * time;
-
-        if (x_next - x_to) * (x_cur - x_to) < 0. {
-            x_next = x_to;
-        }
-        if (y_next - y_to) * (y_cur - y_to) < 0. {
-            y_next = y_to;
-        }
-        if (s_next - s_to) * (s_cur - s_to) < 0. {
-            s_next = s_to;
-        }
-        self.current = TranslateScale::new(Vec2::new(x_next, y_next), s_next);
+        self.t = (self.t + time / self.len).min(1.)
     }
 
     /// Is the animation complete
     fn is_complete(&self) -> bool {
-        trans_approx_eq(self.current, self.to)
+        self.t >= 1.
     }
 }
 
@@ -501,4 +493,10 @@ fn trans_approx_eq(t1: TranslateScale, t2: TranslateScale) -> bool {
     let (t1, s1) = t1.as_tuple();
     let (t2, s2) = t2.as_tuple();
     (t2 - t1).hypot2() < EPSILON.powi(2) && (s1 - s2).abs() < EPSILON
+}
+
+/// Apply easing function
+fn ease(t: f64) -> f64 {
+    let f = t - 1.;
+    f * f * f + 1.
 }
