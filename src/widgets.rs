@@ -3,107 +3,105 @@ use druid::{
     piet::{Image, InterpolationMode, Piet, PietImage},
     scroll_component::ScrollComponent,
     widget::prelude::*,
-    Data, ImageBuf, MouseButton, MouseEvent, RenderContext, Selector, Target,
+    Command, Data, ImageBuf, MouseButton, MouseEvent, RenderContext, Selector,
 };
 use std::{rc::Rc, sync::Arc};
 
 /// The amount to scale scrolls by
 const SCROLL_TWEAK: f64 = 0.5;
+const MIN_SCALE: f64 = 0.2; // 20%
 const MAX_SCALE: f64 = 15.0; // 1_500%
 
+/// Set the zoom to a particular scale.
 pub const SET_SCALE: Selector<f64> = Selector::new("image-viewer.set-scale");
-pub const TRANS_CHANGED: Selector<TranslateScale> = Selector::new("image-viewer.transform-changed");
+/// Change the zoom by a factor (<1. is shrink, >1 is grow)
+pub const ZOOM: Selector<f64> = Selector::new("image-viewer.zoom");
+/// This widget will report changes to scale or offset.
+pub const NOTIFY_TRANSFORM: Selector<TranslateScale> =
+    Selector::new("image-viewer.notify-transform");
 
 pub struct ZoomImage {
-    /// For drawing scrollbars.
-    scroll_component: ScrollComponent,
+    /// The transformation to apply to the image for drawing. Maps image coords
+    /// to widget coords.
+    trans: TranslateScale,
+    /// Whether we are in normal mode, or if there is a drag or animation in progress.
+    mode: Mode,
 
-    inner: Option<ZoomImageInner>,
+    /// We need a cache for the piet image buffer, because we cannot create it
+    /// until `paint` is called.
+    piet_image: Option<Rc<PietImage>>,
 }
 
-impl ZoomImage {
-    pub fn new() -> Self {
-        ZoomImage {
-            scroll_component: ScrollComponent::new(),
-            inner: None,
-        }
-    }
-}
-
-impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
-    fn event(
-        &mut self,
-        ctx: &mut EventCtx,
-        event: &Event,
-        _data: &mut Option<Arc<ImageBuf>>,
-        _env: &Env,
-    ) {
+impl Widget<Arc<ImageBuf>> for ZoomImage {
+    fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut Arc<ImageBuf>, _env: &Env) {
         match event {
-            // f64::clamp has been stabilized. Use here once it's ridden the trains.
+            Event::Command(cmd) => {
+                if let Some(scale) = cmd.get(SET_SCALE) {
+                    // TODO figure out how to use widget ids.
+                    //if matches!(cmd.target(), Target::Widget(wid) if wid == ctx.widget_id()) {
+                    // Zoom around the middle of the widget
+                    let zoom_point = (ctx.size() * 0.5).to_vec2().to_point();
+                    self.zoom_to(data, ctx.size(), *scale, zoom_point);
+                    ctx.request_paint();
+                    if self.is_animating() {
+                        ctx.request_anim_frame();
+                    }
+                    ctx.submit_command(self.notify_transform());
+                    //}
+                }
+                if let Some(scale_factor) = cmd.get(ZOOM) {
+                    // Zoom around the middle of the widget
+                    let zoom_point = (ctx.size() * 0.5).to_vec2().to_point();
+                    self.zoom(data, ctx.size(), *scale_factor, zoom_point);
+                    ctx.request_paint();
+                    if self.is_animating() {
+                        ctx.request_anim_frame();
+                    }
+                    ctx.submit_command(self.notify_transform());
+                    //}
+                }
+            }
             Event::Wheel(MouseEvent {
                 pos, wheel_delta, ..
             }) => {
-                if let Some(inner) = &mut self.inner {
-                    let scale = (SCROLL_TWEAK * -wheel_delta.y.signum()).exp();
-                    inner.zoom(scale, *pos);
-                    ctx.request_paint();
-                    if inner.is_animating() {
-                        ctx.request_anim_frame();
-                        ctx.submit_notification(TRANS_CHANGED.with(inner.trans));
-                    }
+                let scale = (SCROLL_TWEAK * -wheel_delta.y.signum()).exp();
+                self.zoom(data, ctx.size(), scale, *pos);
+                ctx.request_paint();
+                if self.is_animating() {
+                    ctx.request_anim_frame();
                 }
-            }
-            Event::Command(cmd) => {
-                if let Some(scale) = cmd.get(SET_SCALE) {
-                    if matches!(cmd.target(), Target::Widget(wid) if wid == ctx.widget_id()) {
-                        if let Some(inner) = &mut self.inner {
-                            inner.zoom(*scale, (0., 0.).into());
-                            ctx.request_paint();
-                            if inner.is_animating() {
-                                ctx.request_anim_frame();
-                            }
-                        }
-                    }
-                }
+                ctx.submit_command(self.notify_transform());
             }
             Event::MouseDown(MouseEvent {
                 buttons,
                 window_pos,
                 ..
             }) if buttons.contains(MouseButton::Left) => {
-                if let Some(inner) = &mut self.inner {
-                    if !inner.is_dragging() {
-                        inner.drag_start(*window_pos);
-                        ctx.set_active(true);
-                    }
+                if !self.is_dragging() {
+                    self.drag_start(*window_pos);
+                    ctx.set_active(true);
                 }
             }
             Event::MouseUp(MouseEvent { buttons, .. }) if !buttons.contains(MouseButton::Left) => {
-                if let Some(inner) = &mut self.inner {
-                    if inner.drag_stop() {
-                        ctx.request_anim_frame();
-                        ctx.submit_notification(TRANS_CHANGED.with(inner.trans));
-                    }
-                    ctx.request_paint();
+                if self.drag_stop(data, ctx.size()) {
+                    ctx.request_anim_frame();
                 }
+                ctx.request_paint();
                 ctx.set_active(false);
+                ctx.submit_command(self.notify_transform());
             }
             Event::MouseMove(MouseEvent { window_pos, .. }) => {
-                if let Some(inner) = &mut self.inner {
-                    inner.drag_move(*window_pos, ctx);
-                }
+                self.drag_move(*window_pos, ctx);
             }
             Event::AnimFrame(time) => {
                 // scale to ms.
                 let time = *time as f64 * 0.000_001;
-                if let Some(inner) = &mut self.inner {
-                    if let Mode::Anim(anim) = &mut inner.mode {
-                        anim.update(time);
-                        if anim.is_complete() {
-                            inner.mode = Mode::Normal;
-                        } else {
-                            ctx.request_anim_frame();
-                        }
+                if let Mode::Anim(anim) = &mut self.mode {
+                    anim.update(time);
+                    if anim.is_complete() {
+                        self.mode = Mode::Normal;
+                    } else {
+                        ctx.request_anim_frame();
                     }
                 }
                 ctx.request_paint();
@@ -114,20 +112,18 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
 
     fn lifecycle(
         &mut self,
-        _ctx: &mut LifeCycleCtx,
+        ctx: &mut LifeCycleCtx,
         event: &LifeCycle,
-        _data: &Option<Arc<ImageBuf>>,
+        data: &Arc<ImageBuf>,
         _env: &Env,
     ) {
         match event {
-            LifeCycle::WidgetAdded => {}
+            LifeCycle::WidgetAdded => (),
             LifeCycle::Size(size) => {
-                if let Some(inner) = &mut self.inner {
-                    inner.size = *size;
-                    inner.constrain_transform();
-                    // Cancel drag and complete animation.
-                    inner.mode = Mode::Normal;
-                }
+                self.constrain_transform(data, *size);
+                ctx.submit_command(self.notify_transform());
+                // Cancel drag and complete animation.
+                self.mode = Mode::Normal;
             }
             _ => (),
         }
@@ -136,27 +132,17 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
     fn update(
         &mut self,
         ctx: &mut UpdateCtx,
-        old_data: &Option<Arc<ImageBuf>>,
-        data: &Option<Arc<ImageBuf>>,
+        old_data: &Arc<ImageBuf>,
+        data: &Arc<ImageBuf>,
         _env: &Env,
     ) {
         // TODO it would be nice if we could make the image here.
-        match (old_data.as_ref(), data.as_ref()) {
-            (Some(prev), Some(next)) if !prev.same(next) => {
-                // Image must be `Some` because previous data is `Some`.
-                self.inner.as_mut().unwrap().set_image((*next).clone());
-                //ctx.submit_command(scale_cmd(self.scale, ctx.widget_id()));
-                ctx.request_paint();
-            }
-            (None, Some(next)) => {
-                self.inner = Some(ZoomImageInner::new((*next).clone(), ctx.size()));
-                ctx.request_paint();
-            }
-            (Some(_), None) => {
-                self.inner = None;
-                ctx.request_paint();
-            }
-            (Some(_), Some(_)) | (None, None) => (), // no change
+        if !old_data.same(data) {
+            // invalidate image
+            self.piet_image = None;
+            self.constrain_transform(data, ctx.size());
+            ctx.submit_command(self.notify_transform());
+            ctx.request_paint();
         }
     }
 
@@ -164,7 +150,7 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
         &mut self,
         _ctx: &mut LayoutCtx,
         bc: &BoxConstraints,
-        _data: &Option<Arc<ImageBuf>>,
+        _data: &Arc<ImageBuf>,
         _env: &Env,
     ) -> Size {
         // We take all the space we can.
@@ -173,17 +159,12 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
         bc.max()
     }
 
-    fn paint(&mut self, ctx: &mut PaintCtx, _data: &Option<Arc<ImageBuf>>, _env: &Env) {
-        let inner = match &mut self.inner {
-            Some(v) => v,
-            // nothing to draw if we don't have an image.
-            None => return,
-        };
-        debug_assert_eq!(inner.size, ctx.size());
-        ctx.clip(inner.size.to_rect());
+    fn paint(&mut self, ctx: &mut PaintCtx, data: &Arc<ImageBuf>, _env: &Env) {
+        let widget_area = ctx.size().to_rect();
+        ctx.clip(widget_area);
 
-        let trans = inner.draw_transform();
-        let image = inner.image(ctx);
+        let trans = self.draw_transform();
+        let image = self.image(data, ctx);
 
         ctx.draw_image(
             &image,
@@ -193,53 +174,52 @@ impl Widget<Option<Arc<ImageBuf>>> for ZoomImage {
     }
 }
 
-/// We only hold this state when an actual image is present.
-struct ZoomImageInner {
-    /// The underlying image we will be painting
-    pub image: Arc<ImageBuf>,
-
-    /// The size of the area we will be drawing to
-    pub size: Size,
-    /// The transformation to apply to the image for drawing. Maps image coords
-    /// to widget coords.
-    trans: TranslateScale,
-    /// Whether we are in normal mode, or if there is a drag or animation in progress.
-    pub mode: Mode,
-
-    /// We need a cache for the piet image buffer, because we cannot create it
-    /// until `paint` is called.
-    piet_image: Option<Rc<PietImage>>,
-}
-
-impl ZoomImageInner {
-    pub fn new(image: Arc<ImageBuf>, size: Size) -> Self {
-        let mut out = Self {
-            image,
-            size,
+impl ZoomImage {
+    pub fn new() -> Self {
+        Self {
             trans: Default::default(),
             mode: Mode::Normal,
             piet_image: None,
-        };
-        out.constrain_transform();
-        out
+        }
     }
 
-    fn set_image(&mut self, image: Arc<ImageBuf>) {
-        self.image = image;
-        self.piet_image = None;
-        self.constrain_transform();
-        // Cancel animation & drag.
-        self.mode = Mode::Normal;
-    }
-
-    fn image(&mut self, rc: &mut Piet) -> Rc<PietImage> {
+    fn image(&mut self, data: &Arc<ImageBuf>, rc: &mut Piet) -> Rc<PietImage> {
         if let Some(img) = self.piet_image.as_ref() {
             return img.clone();
         } else {
-            self.piet_image
-                .insert(Rc::new(self.image.to_image(rc)))
-                .clone()
+            self.piet_image.insert(Rc::new(data.to_image(rc))).clone()
         }
+    }
+
+    /// Request to change the zoom level by the given factor.
+    ///
+    /// What the scale and offset actually change to will depend on constraints.
+    ///
+    /// A scale factor `> 1` means enlarge, `< 1` means shrink. A scale factor
+    /// of `1` does nothing.
+    ///
+    /// `origin` is the point in widget space where the zoom is centred.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic unless `0 < scale_factor < infinity` and
+    /// `origin` is finite.
+    fn zoom(&mut self, data: &Arc<ImageBuf>, widget_size: Size, scale_factor: f64, origin: Point) {
+        /*
+        println!(
+            "scale_factor: {:.2} image_size: {:.2} view_size {:.2} origin {:.2}",
+            scale_factor,
+            self.image.size(),
+            self.size,
+            origin,
+        );
+        */
+        self.zoom_to(
+            data,
+            widget_size,
+            self.trans.as_tuple().1 * scale_factor,
+            origin,
+        );
     }
 
     /// Request a change to the zoom level.
@@ -255,11 +235,11 @@ impl ZoomImageInner {
     ///
     /// This function will panic unless `0 < scale_factor < infinity` and
     /// `center` is finite.
-    fn zoom(&mut self, scale_factor: f64, origin: Point) {
+    fn zoom_to(&mut self, data: &Arc<ImageBuf>, widget_size: Size, scale: f64, origin: Point) {
         assert!(
-            0. < scale_factor && scale_factor.is_finite(),
-            "zoom scale factor must be in (0, infinity), got {}",
-            scale_factor
+            0. < scale && scale.is_finite(),
+            "zoom scale must be in (0, infinity), got {}",
+            scale
         );
         assert!(
             origin.x.is_finite() && origin.y.is_finite(),
@@ -282,9 +262,8 @@ impl ZoomImageInner {
         let origin_img = self.trans.inverse() * origin;
 
         // Scale
-        let scale = self.trans.as_tuple().1 * scale_factor;
         // Constrain the scale
-        let scale = constrain_scale(self.image.size(), self.size, scale);
+        let scale = constrain_scale(data.size(), widget_size, scale);
 
         // Offset
         let origin_scaled = origin_img.to_vec2() * scale;
@@ -294,7 +273,7 @@ impl ZoomImageInner {
         let diff = origin.to_vec2() - origin_scaled;
 
         self.trans = TranslateScale::new(diff, scale);
-        self.constrain_transform();
+        self.constrain_transform(data, widget_size);
         if !trans_approx_eq(self.trans, old_trans) {
             match &mut self.mode {
                 Mode::Normal => {
@@ -335,12 +314,12 @@ impl ZoomImageInner {
     /// Complete drag state (go back to normal).
     ///
     /// Returns true if we need to request animation frame.
-    fn drag_stop(&mut self) -> bool {
+    fn drag_stop(&mut self, data: &Arc<ImageBuf>, widget_size: Size) -> bool {
         if let Mode::Drag(drag) = &self.mode {
             let (trans, scale) = self.trans.as_tuple();
             let current_trans = TranslateScale::new(trans + drag.diff, scale);
             self.trans = current_trans;
-            self.constrain_transform();
+            self.constrain_transform(data, widget_size);
             if trans_approx_eq(self.trans, current_trans) {
                 self.mode = Mode::Normal;
                 false
@@ -364,8 +343,8 @@ impl ZoomImageInner {
     }
 
     /// Helper function to call `constrain_transform` for this image.
-    fn constrain_transform(&mut self) {
-        self.trans = constrain_transform(self.image.size(), self.size, self.trans);
+    fn constrain_transform(&mut self, data: &Arc<ImageBuf>, widget_size: Size) {
+        self.trans = constrain_transform(data.size(), widget_size, self.trans);
     }
 
     fn is_dragging(&self) -> bool {
@@ -374,6 +353,10 @@ impl ZoomImageInner {
 
     fn is_animating(&self) -> bool {
         matches!(self.mode, Mode::Anim(_))
+    }
+
+    fn notify_transform(&self) -> Command {
+        NOTIFY_TRANSFORM.with(self.trans.inverse())
     }
 }
 
@@ -480,13 +463,13 @@ fn constrain_transform(img_size: Size, widget_size: Size, trans: TranslateScale)
 
 fn constrain_scale(img_size: Size, widget_size: Size, scale: f64) -> f64 {
     //  - At the lower end, the scale should be bigger than the smaller of
-    //    - 100%
+    //    - a compile-time minimum scale (e.g. 20%)
     //    - the biggest size that can fit the whole image in.
     //  - At the higher end, the scale should be smaller than some maximum scale.
     // If both constrains are not satisfyable, then choose the size from the minimum test.
     let min_x_scale = widget_size.width / img_size.width;
     let min_y_scale = widget_size.height / img_size.height;
-    let min_scale = min_x_scale.min(min_y_scale).min(1.);
+    let min_scale = min_x_scale.min(min_y_scale).min(MIN_SCALE);
     scale.min(MAX_SCALE).max(min_scale)
 }
 

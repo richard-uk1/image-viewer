@@ -12,10 +12,12 @@ druid-lens-compose = "0.2"
 notify = "5.0.0-pre.13"
 qu = "0.3.1"
 structopt = "0.3.25"
+druid-widget-nursery = { git = "https://github.com/linebender/druid-widget-nursery" }
 
 [dependencies.druid]
 #path = "../../contrib/druid/druid"
-#git = "https://github.com/linebender/druid"
+git = "https://github.com/linebender/druid"
+rev = "0a82b127eac325c9c721364a5d81f1bfd931cb13"
 version = "0.7"
 features = [
     "image",
@@ -33,5 +35,5 @@ features = [
     "tga",
     "farbfeld",
     "dxt",
-    "hdr"
+    "hdr",
 ]

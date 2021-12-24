@@ -5,7 +5,7 @@ use druid::{
     commands::{OPEN_FILE, SHOW_OPEN_PANEL},
     kurbo::Point,
     theme,
-    widget::{prelude::*, Flex, Label, Svg},
+    widget::{prelude::*, Flex, Label, Maybe, Svg},
     AppDelegate, AppLauncher, ArcStr, Command, Data, DelegateCtx, Env, ExtEventSink,
     FileDialogOptions, FileSpec, Handled, ImageBuf, Lens, Selector, SingleUse, Target, Widget,
     WidgetExt, WidgetPod, WindowDesc,
@@ -14,11 +14,12 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use qu::ick_use::*;
 use std::{error::Error, path::PathBuf, sync::Arc, thread, time::Duration};
 
-use crate::widgets::{ZoomImage, SET_SCALE};
+use crate::widgets::{ZoomImage, NOTIFY_TRANSFORM, SET_SCALE, ZOOM};
 
 const FILE_LOADED: Selector<SingleUse<Result<ImageBuf, Box<dyn Error + Send + Sync>>>> =
     Selector::new("image-viewer.file-loaded");
 const OPEN_IMAGE_SVG: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/image.svg"));
+const ZOOM_SVG: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/zoom.svg"));
 const ALL_IMAGES: FileSpec = FileSpec::new("Image", &["jpg", "jpeg", "gif", "bmp", "png"]);
 
 #[derive(Debug, Clone, Data, Lens)]
@@ -50,7 +51,7 @@ impl AppData {
 
 #[qu::ick]
 pub fn main() -> Result {
-    let main_window = WindowDesc::new(ui_builder).title("Image Viewer");
+    let main_window = WindowDesc::new(ui_builder()).title("Image Viewer");
     // Set our initial data
     let data = AppData::new();
     let launcher = AppLauncher::with_window(main_window);
@@ -173,11 +174,18 @@ impl IoState {
 fn ui_builder() -> impl Widget<AppData> {
     let ribbon = Flex::row()
         .with_child(open_button())
-        .with_child(actual_size_button())
+        .with_child(zoom_out_button())
+        .with_child(zoom_1_button())
+        .with_child(zoom_in_button())
         .align_left();
     Flex::column()
         .with_child(ribbon)
-        .with_flex_child(ZoomImage::new().lens(AppData::image).center(), 1.0)
+        .with_flex_child(
+            Maybe::or_empty(|| ZoomImage::new())
+                .lens(AppData::image)
+                .center(),
+            1.0,
+        )
         .with_child(
             Flex::row()
                 .with_child(Label::raw().lens(AppData::error))
@@ -210,7 +218,9 @@ fn open_button() -> impl Widget<AppData> {
     )
 }
 
-fn actual_size_button() -> impl Widget<AppData> {
+const ZOOM_FACTOR: f64 = 1.5;
+
+fn zoom_out_button() -> impl Widget<AppData> {
     BgHover::new(
         Flex::column()
             .with_child(
@@ -219,10 +229,44 @@ fn actual_size_button() -> impl Widget<AppData> {
                     .fix_width(50.),
             )
             // no need for spacer because of spacing around image
-            .with_child(Label::new("Actual Size"))
+            .with_child(Label::new("<"))
+            .padding(4.)
+            .on_click(|ctx, _, _| {
+                ctx.submit_command(ZOOM.with(ZOOM_FACTOR.recip()));
+            }),
+    )
+}
+
+fn zoom_1_button() -> impl Widget<AppData> {
+    BgHover::new(
+        Flex::column()
+            .with_child(
+                Svg::new(ZOOM_SVG.parse().unwrap())
+                    .fix_height(30.)
+                    .fix_width(50.),
+            )
+            // no need for spacer because of spacing around image
+            .with_child(Label::new("100%"))
             .padding(4.)
             .on_click(|ctx, _, _| {
                 ctx.submit_command(SET_SCALE.with(1.));
+            }),
+    )
+}
+
+fn zoom_in_button() -> impl Widget<AppData> {
+    BgHover::new(
+        Flex::column()
+            .with_child(
+                Svg::new(OPEN_IMAGE_SVG.parse().unwrap())
+                    .fix_height(30.)
+                    .fix_width(50.),
+            )
+            // no need for spacer because of spacing around image
+            .with_child(Label::new(">"))
+            .padding(4.)
+            .on_click(|ctx, _, _| {
+                ctx.submit_command(ZOOM.with(ZOOM_FACTOR));
             }),
     )
 }
@@ -256,11 +300,17 @@ impl AppDelegate<AppData> for Delegate {
                 Err(e) => data.set_error(format!("error decoding/loading image: {}", e).into()),
             }
             Handled::Yes
-            /*
-            } else if let Some(scale) = cmd.get(UPDATE_SCALE) {
-                data.info = format!("scale: {:.2}%", scale * 100.).into();
-                Handled::No
-                */
+        } else if let Some(trans) = cmd.get(NOTIFY_TRANSFORM) {
+            let (translate, scale) = trans.as_tuple();
+            data.info = format!(
+                "scale: {:4.0}% translate: ({:.0},{:.0})",
+                // little fiddle to get correct values
+                scale.recip() * 100.,
+                translate.x.max(0.),
+                translate.y.max(0.),
+            )
+            .into();
+            Handled::No
         } else {
             Handled::No
         }
@@ -295,7 +345,7 @@ impl<T: Data, W: Widget<T>> Widget<T> for BgHover<T, W> {
         }
         self.inner.lifecycle(ctx, event, data, env)
     }
-    fn update(&mut self, ctx: &mut UpdateCtx, old_data: &T, data: &T, env: &Env) {
+    fn update(&mut self, ctx: &mut UpdateCtx, _old_data: &T, data: &T, env: &Env) {
         self.inner.update(ctx, data, env)
     }
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints, data: &T, env: &Env) -> Size {
