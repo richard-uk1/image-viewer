@@ -2,11 +2,11 @@ mod widgets;
 
 use crossbeam_channel::{self as channel, Receiver, RecvError};
 use druid::{
-    commands::{OPEN_FILE, SHOW_OPEN_PANEL},
-    kurbo::Point,
+    commands::{OPEN_FILE, QUIT_APP, SHOW_OPEN_PANEL},
+    kurbo::{Affine, Point},
     theme,
-    widget::{prelude::*, Flex, Label, Maybe, Svg},
-    AppDelegate, AppLauncher, ArcStr, Command, Data, DelegateCtx, Env, ExtEventSink,
+    widget::{prelude::*, Flex, Label, Maybe, Painter, Svg},
+    AppDelegate, AppLauncher, ArcStr, Color, Command, Data, DelegateCtx, Env, ExtEventSink,
     FileDialogOptions, FileSpec, Handled, ImageBuf, Lens, Selector, SingleUse, Target, Widget,
     WidgetExt, WidgetPod, WindowDesc,
 };
@@ -14,12 +14,11 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use qu::ick_use::*;
 use std::{error::Error, path::PathBuf, sync::Arc, thread, time::Duration};
 
-use crate::widgets::{ZoomImage, NOTIFY_TRANSFORM, SET_SCALE, ZOOM};
+use crate::widgets::{Icon, ZoomImage, NOTIFY_TRANSFORM, SET_SCALE, ZOOM};
+use druid_material_icons::{CHEVRON_LEFT, CHEVRON_RIGHT, EXIT_TO_APP, IMAGE, SEARCH};
 
 const FILE_LOADED: Selector<SingleUse<Result<ImageBuf, Box<dyn Error + Send + Sync>>>> =
     Selector::new("image-viewer.file-loaded");
-const OPEN_IMAGE_SVG: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/image.svg"));
-const ZOOM_SVG: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/zoom.svg"));
 const ALL_IMAGES: FileSpec = FileSpec::new("Image", &["jpg", "jpeg", "gif", "bmp", "png"]);
 
 #[derive(Debug, Clone, Data, Lens)]
@@ -174,10 +173,12 @@ impl IoState {
 fn ui_builder() -> impl Widget<AppData> {
     let ribbon = Flex::row()
         .with_child(open_button())
+        .with_flex_spacer(1.)
         .with_child(zoom_out_button())
         .with_child(zoom_1_button())
         .with_child(zoom_in_button())
-        .align_left();
+        .with_flex_spacer(1.)
+        .with_child(close_button());
     Flex::column()
         .with_child(ribbon)
         .with_flex_child(
@@ -198,11 +199,7 @@ fn ui_builder() -> impl Widget<AppData> {
 fn open_button() -> impl Widget<AppData> {
     BgHover::new(
         Flex::column()
-            .with_child(
-                Svg::new(OPEN_IMAGE_SVG.parse().unwrap())
-                    .fix_height(30.)
-                    .fix_width(50.),
-            )
+            .with_child(Icon::new(IMAGE, Color::WHITE).fix_height(30.))
             // no need for spacer because of spacing around image
             .with_child(Label::new("Open"))
             .padding(4.)
@@ -223,13 +220,8 @@ const ZOOM_FACTOR: f64 = 1.5;
 fn zoom_out_button() -> impl Widget<AppData> {
     BgHover::new(
         Flex::column()
-            .with_child(
-                Svg::new(OPEN_IMAGE_SVG.parse().unwrap())
-                    .fix_height(30.)
-                    .fix_width(50.),
-            )
-            // no need for spacer because of spacing around image
-            .with_child(Label::new("<"))
+            .with_child(Icon::new(CHEVRON_LEFT, Color::WHITE).fix_height(30.))
+            .with_child(Label::new(""))
             .padding(4.)
             .on_click(|ctx, _, _| {
                 ctx.submit_command(ZOOM.with(ZOOM_FACTOR.recip()));
@@ -240,12 +232,7 @@ fn zoom_out_button() -> impl Widget<AppData> {
 fn zoom_1_button() -> impl Widget<AppData> {
     BgHover::new(
         Flex::column()
-            .with_child(
-                Svg::new(ZOOM_SVG.parse().unwrap())
-                    .fix_height(30.)
-                    .fix_width(50.),
-            )
-            // no need for spacer because of spacing around image
+            .with_child(Icon::new(SEARCH, Color::WHITE).fix_height(30.))
             .with_child(Label::new("100%"))
             .padding(4.)
             .on_click(|ctx, _, _| {
@@ -257,16 +244,23 @@ fn zoom_1_button() -> impl Widget<AppData> {
 fn zoom_in_button() -> impl Widget<AppData> {
     BgHover::new(
         Flex::column()
-            .with_child(
-                Svg::new(OPEN_IMAGE_SVG.parse().unwrap())
-                    .fix_height(30.)
-                    .fix_width(50.),
-            )
-            // no need for spacer because of spacing around image
-            .with_child(Label::new(">"))
+            .with_child(Icon::new(CHEVRON_RIGHT, Color::WHITE).fix_height(30.))
+            .with_child(Label::new(""))
             .padding(4.)
             .on_click(|ctx, _, _| {
                 ctx.submit_command(ZOOM.with(ZOOM_FACTOR));
+            }),
+    )
+}
+
+fn close_button() -> impl Widget<AppData> {
+    BgHover::new(
+        Flex::column()
+            .with_child(Icon::new(EXIT_TO_APP, Color::WHITE).fix_height(30.))
+            .with_child(Label::new("Exit"))
+            .padding(4.)
+            .on_click(|ctx, _, _| {
+                ctx.submit_command(QUIT_APP);
             }),
     )
 }

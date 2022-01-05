@@ -12,8 +12,9 @@ druid-lens-compose = "0.2"
 notify = "5.0.0-pre.13"
 qu = "0.3.1"
 structopt = "0.3.25"
-druid-widget-nursery = { git = "https://github.com/linebender/druid-widget-nursery" }
+#druid-widget-nursery = { git = "https://github.com/linebender/druid-widget-nursery" }
 easings = "0.1.0"
+druid-material-icons = { git = "https://github.com/derekdreery/druid-material-icons", branch = "no_submodules", default-features = false  }
 
 [dependencies.druid]
 #path = "../../contrib/druid/druid"

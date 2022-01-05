@@ -1,10 +1,11 @@
 use druid::{
-    kurbo::{Point, TranslateScale, Vec2},
-    piet::{Image, InterpolationMode, Piet, PietImage},
+    kurbo::{Affine, Point, TranslateScale, Vec2},
+    piet::{Color, Image, InterpolationMode, Piet, PietImage},
     scroll_component::ScrollComponent,
     widget::prelude::*,
     Command, Data, ImageBuf, MouseButton, MouseEvent, RenderContext, Selector,
 };
+use druid_material_icons::IconShapes;
 use std::{rc::Rc, sync::Arc};
 
 /// The amount to scale scrolls by
@@ -495,8 +496,46 @@ fn trans_approx_eq(t1: TranslateScale, t2: TranslateScale) -> bool {
     (t2 - t1).hypot2() < EPSILON.powi(2) && (s1 - s2).abs() < EPSILON
 }
 
-/// Apply easing function
-fn ease(t: f64) -> f64 {
-    let f = t - 1.;
-    f * f * f + 1.
+/// Copied from druid-material-icons because versions.
+#[derive(Debug, Clone)]
+pub struct Icon {
+    shapes: IconShapes,
+    color: Color,
+}
+
+impl Icon {
+    #[inline]
+    pub fn new(shapes: IconShapes, color: Color) -> Self {
+        Self { shapes, color }
+    }
+}
+
+impl<T: Data> Widget<T> for Icon {
+    fn event(&mut self, _ctx: &mut EventCtx, _event: &Event, _data: &mut T, _env: &Env) {
+        // no events
+    }
+    fn lifecycle(&mut self, _ctx: &mut LifeCycleCtx, _event: &LifeCycle, _data: &T, _env: &Env) {
+        // no lifecycle
+    }
+    fn update(&mut self, _ctx: &mut UpdateCtx, _old_data: &T, _data: &T, _env: &Env) {
+        // no update
+    }
+    fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints, _data: &T, _env: &Env) -> Size {
+        bc.constrain_aspect_ratio(self.shapes.size.aspect_ratio(), self.shapes.size.width)
+    }
+    fn paint(&mut self, ctx: &mut PaintCtx, _data: &T, _env: &Env) {
+        let Size { width, height } = ctx.size();
+        let Size {
+            width: icon_width,
+            height: icon_height,
+        } = self.shapes.size;
+        ctx.transform(Affine::scale_non_uniform(
+            width * icon_width.recip(),
+            height * icon_height.recip(),
+        ));
+        let brush = ctx.solid_brush(self.color.clone());
+        for shape in self.shapes.shapes {
+            ctx.fill(shape, &brush);
+        }
+    }
 }
