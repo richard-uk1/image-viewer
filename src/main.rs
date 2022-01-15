@@ -3,9 +3,9 @@ mod widgets;
 use crossbeam_channel::{self as channel, Receiver, RecvError};
 use druid::{
     commands::{OPEN_FILE, QUIT_APP, SHOW_OPEN_PANEL},
-    kurbo::{Affine, Point},
+    kurbo::Point,
     theme,
-    widget::{prelude::*, Flex, Label, Maybe, Painter, Svg},
+    widget::{prelude::*, Flex, Label, Maybe},
     AppDelegate, AppLauncher, ArcStr, Color, Command, Data, DelegateCtx, Env, ExtEventSink,
     FileDialogOptions, FileSpec, Handled, ImageBuf, Lens, Selector, SingleUse, Target, Widget,
     WidgetExt, WidgetPod, WindowDesc,
@@ -15,7 +15,11 @@ use qu::ick_use::*;
 use std::{error::Error, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use crate::widgets::{Icon, ZoomImage, NOTIFY_TRANSFORM, SET_SCALE, ZOOM};
-use druid_material_icons::{CHEVRON_LEFT, CHEVRON_RIGHT, EXIT_TO_APP, IMAGE, SEARCH};
+use druid_material_icons::normal::{
+    action::{EXIT_TO_APP, SEARCH},
+    content::{ADD, REMOVE},
+    image::IMAGE,
+};
 
 const FILE_LOADED: Selector<SingleUse<Result<ImageBuf, Box<dyn Error + Send + Sync>>>> =
     Selector::new("image-viewer.file-loaded");
@@ -220,7 +224,7 @@ const ZOOM_FACTOR: f64 = 1.5;
 fn zoom_out_button() -> impl Widget<AppData> {
     BgHover::new(
         Flex::column()
-            .with_child(Icon::new(CHEVRON_LEFT, Color::WHITE).fix_height(30.))
+            .with_child(Icon::new(REMOVE, Color::WHITE).fix_height(30.))
             .with_child(Label::new(""))
             .padding(4.)
             .on_click(|ctx, _, _| {
@@ -244,7 +248,7 @@ fn zoom_1_button() -> impl Widget<AppData> {
 fn zoom_in_button() -> impl Widget<AppData> {
     BgHover::new(
         Flex::column()
-            .with_child(Icon::new(CHEVRON_RIGHT, Color::WHITE).fix_height(30.))
+            .with_child(Icon::new(ADD, Color::WHITE).fix_height(30.))
             .with_child(Label::new(""))
             .padding(4.)
             .on_click(|ctx, _, _| {

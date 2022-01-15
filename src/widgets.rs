@@ -5,7 +5,7 @@ use druid::{
     widget::prelude::*,
     Command, Data, ImageBuf, MouseButton, MouseEvent, RenderContext, Selector,
 };
-use druid_material_icons::IconShapes;
+use druid_material_icons::IconPaths;
 use std::{rc::Rc, sync::Arc};
 
 /// The amount to scale scrolls by
@@ -499,13 +499,13 @@ fn trans_approx_eq(t1: TranslateScale, t2: TranslateScale) -> bool {
 /// Copied from druid-material-icons because versions.
 #[derive(Debug, Clone)]
 pub struct Icon {
-    shapes: IconShapes,
+    shapes: IconPaths,
     color: Color,
 }
 
 impl Icon {
     #[inline]
-    pub fn new(shapes: IconShapes, color: Color) -> Self {
+    pub fn new(shapes: IconPaths, color: Color) -> Self {
         Self { shapes, color }
     }
 }
@@ -533,9 +533,8 @@ impl<T: Data> Widget<T> for Icon {
             width * icon_width.recip(),
             height * icon_height.recip(),
         ));
-        let brush = ctx.solid_brush(self.color.clone());
-        for shape in self.shapes.shapes {
-            ctx.fill(shape, &brush);
+        for shape in self.shapes.paths {
+            ctx.fill(shape, &self.color);
         }
     }
 }
