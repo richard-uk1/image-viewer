@@ -140,6 +140,7 @@ impl IoState {
             notify::EventKind::Modify(_) => {
                 if let Some(path) = self.open_file.take() {
                     // sleep for a bit to let the write finish
+                    // TODO We need to pump events for the duration, otherwise they will back up.
                     thread::sleep(Duration::from_millis(1000));
                     self.load_img(path)
                 } else {
@@ -180,6 +181,7 @@ fn ui_builder() -> impl Widget<AppData> {
         .with_flex_spacer(1.)
         .with_child(zoom_out_button())
         .with_child(zoom_1_button())
+        .with_child(zoom_fit_button())
         .with_child(zoom_in_button())
         .with_flex_spacer(1.)
         .with_child(close_button());
@@ -253,6 +255,18 @@ fn zoom_in_button() -> impl Widget<AppData> {
             .padding(4.)
             .on_click(|ctx, _, _| {
                 ctx.submit_command(ZOOM.with(ZOOM_FACTOR));
+            }),
+    )
+}
+
+fn zoom_fit_button() -> impl Widget<AppData> {
+    BgHover::new(
+        Flex::column()
+            .with_child(Icon::new(SEARCH, Color::WHITE).fix_height(30.))
+            .with_child(Label::new("Fit"))
+            .padding(4.)
+            .on_click(|ctx, _, _| {
+                ctx.submit_command(SET_SCALE.with(0.));
             }),
     )
 }

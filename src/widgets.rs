@@ -32,18 +32,26 @@ pub struct ZoomImage {
     /// We need a cache for the piet image buffer, because we cannot create it
     /// until `paint` is called.
     piet_image: Option<Rc<PietImage>>,
+    /// Track whether the widget was just created. This is used for initial resize. We can't do
+    /// this in WidgetAdded, because we haven't run layout yet.
+    fresh: bool,
 }
 
 impl Widget<Arc<ImageBuf>> for ZoomImage {
     fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut Arc<ImageBuf>, _env: &Env) {
         match event {
             Event::Command(cmd) => {
-                if let Some(scale) = cmd.get(SET_SCALE) {
+                if let Some(&scale) = cmd.get(SET_SCALE) {
                     // TODO figure out how to use widget ids.
                     //if matches!(cmd.target(), Target::Widget(wid) if wid == ctx.widget_id()) {
                     // Zoom around the middle of the widget
-                    let zoom_point = (ctx.size() * 0.5).to_vec2().to_point();
-                    self.zoom_to(data, ctx.size(), *scale, zoom_point);
+                    // We non-positive numbers as a niche to mean "fit to window"
+                    if scale <= 0. || !scale.is_finite() {
+                        self.zoom_to_fit(data, ctx.size());
+                    } else {
+                        let zoom_point = (ctx.size() * 0.5).to_vec2().to_point();
+                        self.zoom_to(data, ctx.size(), scale, zoom_point);
+                    }
                     ctx.request_paint();
                     if self.is_animating() {
                         ctx.request_anim_frame();
@@ -120,12 +128,19 @@ impl Widget<Arc<ImageBuf>> for ZoomImage {
         _env: &Env,
     ) {
         match event {
-            LifeCycle::WidgetAdded => (),
+            LifeCycle::WidgetAdded => {}
             LifeCycle::Size(size) => {
-                self.constrain_transform(data, *size);
+                if self.fresh && !size.is_empty() {
+                    self.fresh = false;
+                    // when inserting a new image we should also fit it to the full widget
+                    self.zoom_to_fit(data, *size);
+                } else {
+                    self.constrain_transform(data, *size);
+                }
                 ctx.submit_command(self.notify_transform());
                 // Cancel drag and complete animation.
                 self.mode = Mode::Normal;
+                ctx.request_paint();
             }
             _ => (),
         }
@@ -142,9 +157,14 @@ impl Widget<Arc<ImageBuf>> for ZoomImage {
         if !old_data.same(data) {
             // invalidate image
             self.piet_image = None;
-            self.constrain_transform(data, ctx.size());
+            if !ctx.size().is_empty() {
+                self.zoom_to_fit(data, ctx.size());
+            }
             ctx.submit_command(self.notify_transform());
             ctx.request_paint();
+            if self.is_animating() {
+                ctx.request_anim_frame();
+            }
         }
     }
 
@@ -156,8 +176,6 @@ impl Widget<Arc<ImageBuf>> for ZoomImage {
         _env: &Env,
     ) -> Size {
         // We take all the space we can.
-        // TODO take less space if we wouldn't fill it all due to zoom.
-        // We'd still need to draw to the middle in case the constraints were tight from below.
         bc.max()
     }
 
@@ -182,6 +200,7 @@ impl ZoomImage {
             trans: Default::default(),
             mode: Mode::Normal,
             piet_image: None,
+            fresh: true,
         }
     }
 
@@ -228,8 +247,7 @@ impl ZoomImage {
     ///
     /// What the scale and offset actually change to will depend on constraints.
     ///
-    /// A scale factor `> 1` means enlarge, `< 1` means shrink. A scale factor
-    /// of `1` does nothing.
+    /// A scale of `1` means 100%.
     ///
     /// `origin` is the point in widget space where the zoom is centred.
     ///
@@ -289,6 +307,14 @@ impl ZoomImage {
                 Mode::Drag(_) => (),
             }
         }
+    }
+
+    fn zoom_to_fit(&mut self, data: &Arc<ImageBuf>, widget_size: Size) {
+        let img_size = data.size();
+        let fit_x_scale = widget_size.width / img_size.width;
+        let fit_y_scale = widget_size.height / img_size.height;
+        let scale = fit_x_scale.min(fit_y_scale);
+        self.zoom_to(data, widget_size, scale, Point::ZERO);
     }
 
     /// Transform the image at 100% scale positioned at (0,0) to the correct image
@@ -363,12 +389,14 @@ impl ZoomImage {
     }
 }
 
+#[derive(Debug)]
 enum Mode {
     Normal,
     Drag(Drag),
     Anim(AnimState),
 }
 
+#[derive(Debug)]
 struct Drag {
     /// The mouse position at the start of the scroll
     start: Point,
@@ -381,6 +409,7 @@ struct Drag {
 }
 
 /// For animation
+#[derive(Debug)]
 struct AnimState {
     /// The current position in the animation
     t: f64,
